@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: chofu-driving-auto-booker
+    runtime: docker
+    plan: free
+    autoDeploy: false
+    healthCheckPath: /healthz
+    envVars:
+      - key: START_URL
+        sync: false
+      - key: STUDENT_ID
+        sync: false
+      - key: PASSWORD
+        sync: false
+      - key: NTFY_TOPIC
+        sync: false
+      - key: AUTO_BOOK
+        value: "false"
+      - key: POLL_INTERVAL_SECONDS
+        value: "70"
+      - key: HEADLESS
+        value: "true"
+      - key: APPROVAL_MINUTES
+        value: "5"
+      - key: SAME_DAY_RENOTIFY_MINUTES
+        value: "10"
+      - key: MAINTENANCE_RETRY_MINUTES
+        value: "5"
