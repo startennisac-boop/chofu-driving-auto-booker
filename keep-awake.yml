@@ -1,0 +1,21 @@
+name: Keep reservation monitor awake
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping health endpoint
+        env:
+          SERVICE_URL: ${{ secrets.SERVICE_URL }}
+        run: |
+          test -n "$SERVICE_URL"
+          curl --fail --silent --show-error --max-time 90 "$SERVICE_URL/healthz"
