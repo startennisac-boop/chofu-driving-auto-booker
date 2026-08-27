@@ -2,6 +2,26 @@ import { chromium } from "playwright";
 import { createServer } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
+function parseBlockedWindows(raw) {
+  if (!raw?.trim()) return [];
+  let entries;
+  try {
+    entries = JSON.parse(raw);
+  } catch {
+    throw new Error("BLOCKED_WINDOWS はJSON形式で設定してください");
+  }
+  if (!Array.isArray(entries)) throw new Error("BLOCKED_WINDOWS は配列で設定してください");
+  return entries.map((entry, index) => {
+    const date = String(entry?.date || "").replaceAll("-", "/");
+    const start = String(entry?.start || "");
+    const end = String(entry?.end || "");
+    if (!/^\d{4}\/\d{2}\/\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(start) || !/^\d{2}:\d{2}$/.test(end) || start >= end) {
+      throw new Error(`BLOCKED_WINDOWS の${index + 1}件目が不正です`);
+    }
+    return { date, start, end, label: String(entry?.label || "予定あり") };
+  });
+}
+
 const config = {
   startUrl: process.env.START_URL?.trim(),
   studentId: process.env.STUDENT_ID?.trim(),
@@ -9,6 +29,7 @@ const config = {
   ntfyTopic: process.env.NTFY_TOPIC?.trim(),
   autoBook: /^true$/i.test(process.env.AUTO_BOOK || "false"),
   autoBookNotBefore: process.env.AUTO_BOOK_NOT_BEFORE ? Date.parse(process.env.AUTO_BOOK_NOT_BEFORE) : 0,
+  blockedWindows: parseBlockedWindows(process.env.BLOCKED_WINDOWS),
   pollMs: Math.max(60, Number(process.env.POLL_INTERVAL_SECONDS || 60)) * 1000,
   headless: !/^false$/i.test(process.env.HEADLESS || "true"),
   approvalMs: Math.max(2, Number(process.env.APPROVAL_MINUTES || 5)) * 60_000,
@@ -211,6 +232,21 @@ function dateForDayIndex(weekLabel, dayIndex) {
   return `${start.getUTCFullYear()}/${String(start.getUTCMonth() + 1).padStart(2, "0")}/${String(start.getUTCDate()).padStart(2, "0")}`;
 }
 
+function timeRanges(text) {
+  return [...String(text || "").matchAll(/(\d{1,2}):(\d{2})\s*[～~〜\-–—]\s*(\d{1,2}):(\d{2})/g)].map((match) => ({
+    start: `${match[1].padStart(2, "0")}:${match[2]}`,
+    end: `${match[3].padStart(2, "0")}:${match[4]}`,
+  }));
+}
+
+function blockedOverlap(date, text) {
+  const ranges = timeRanges(text);
+  for (const block of config.blockedWindows.filter((item) => item.date === date)) {
+    if (ranges.some((range) => range.start < block.end && block.start < range.end)) return block;
+  }
+  return null;
+}
+
 async function findVacancies(frame, target, weekLabel) {
   const result = [];
   const containers = frame.locator('[id^="lstDetail_"][id$="_lc"]');
@@ -263,6 +299,11 @@ async function finishBooking(frame, vacancy, target) {
     if (/以下の内容で予約してもよろしいですか/.test(bodyText)) {
       if (!bodyText.includes(vacancy.date) || !bodyText.includes(target)) {
         throw new Error(`予約確認内容が検出した枠と一致しません（予定: ${target} ${vacancy.details}）`);
+      }
+      const block = blockedOverlap(vacancy.date, bodyText);
+      if (block) {
+        log(`禁止時間と重なるため予約しません: ${vacancy.date} ${block.start}-${block.end} ${block.label}`);
+        return false;
       }
     }
     const actions = await visibleActionControls(frame);
@@ -349,6 +390,11 @@ async function monitor(page) {
       for (const option of options) {
         await refreshWeek(frame, option.value);
         for (const vacancy of await findVacancies(frame, target, option.label)) {
+          const block = blockedOverlap(vacancy.date, vacancy.details);
+          if (block) {
+            log(`禁止時間と重なる空き枠を除外: ${vacancy.details} (${block.label})`);
+            continue;
+          }
           if (vacancy.date === tokyoDate()) {
             await requestSameDayApproval(vacancy, target);
             continue;
