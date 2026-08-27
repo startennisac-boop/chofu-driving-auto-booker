@@ -190,24 +190,34 @@ async function refreshWeek(frame, optionValue) {
   await sleep(700);
 }
 
-async function findVacancies(frame, target) {
+function parseWeekStart(label) {
+  const match = String(label || "").match(/(\d{4})\/(\d{1,2})\/(\d{1,2})/);
+  if (!match) return null;
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+}
+
+function dateForDayIndex(weekLabel, dayIndex) {
+  const start = parseWeekStart(weekLabel);
+  if (!start) return "";
+  start.setUTCDate(start.getUTCDate() + dayIndex);
+  return `${start.getUTCFullYear()}/${String(start.getUTCMonth() + 1).padStart(2, "0")}/${String(start.getUTCDate()).padStart(2, "0")}`;
+}
+
+async function findVacancies(frame, target, weekLabel) {
   const result = [];
   const containers = frame.locator('[id^="lstDetail_"][id$="_lc"]');
   for (let i = 0; i < (await containers.count()); i += 1) {
     const container = containers.nth(i);
-    const rowText = await container.evaluate((element) => {
-      const row = element.closest("tr") || element.parentElement?.parentElement || element.parentElement;
-      return (row?.innerText || element.innerText || "").replace(/\s+/g, " ").trim();
-    });
-    const date = rowText.match(/\d{4}\/\d{2}\/\d{2}/)?.[0] || "";
+    const containerId = await container.getAttribute("id");
+    const dayIndex = Number(containerId?.match(/lstDetail_(\d+)_lc/)?.[1] ?? i);
+    const date = dateForDayIndex(weekLabel, dayIndex);
     const items = container.locator(":scope > *");
     for (let itemIndex = 0; itemIndex < (await items.count()); itemIndex += 1) {
       const item = items.nth(itemIndex);
-      if (!(await item.isVisible().catch(() => false))) continue;
       const itemText = normalize(await item.innerText().catch(() => ""));
       if (!itemText) continue;
       const details = normalize(`${date} ${itemText}`);
-      result.push({ containerId: await container.getAttribute("id"), itemIndex, date, details, fingerprint: `${target}|${date}|${itemText}` });
+      result.push({ containerId, dayIndex, itemIndex, date, details, fingerprint: `${target}|${date}|${itemText}` });
     }
   }
   return result;
@@ -215,9 +225,14 @@ async function findVacancies(frame, target) {
 
 async function clickVacancy(frame, vacancy) {
   const item = frame.locator(`#${vacancy.containerId}`).locator(":scope > *").nth(vacancy.itemIndex);
+  const expander = frame.locator(`#lstDetail_${vacancy.dayIndex}_pbt`);
+  if (!(await item.isVisible().catch(() => false)) && await expander.count()) {
+    await expander.click({ force: true });
+    await sleep(350);
+  }
   const clickable = item.locator('button, input[type="submit"], a, [onclick], [role="button"]');
-  if (await clickable.count()) await clickable.first().click();
-  else await item.click();
+  if (await clickable.count()) await clickable.first().click({ force: true });
+  else await item.click({ force: true });
   await sleep(800);
 }
 
@@ -236,9 +251,14 @@ async function visibleActionControls(frame) {
 async function finishBooking(frame, vacancy, target) {
   for (let step = 0; step < 3; step += 1) {
     const bodyText = await frame.locator("body").innerText();
-    if (/予約(が)?(完了|成立)|予約しました|予約を受け付け/.test(bodyText)) return true;
+    if (/予約(が)?(完了|成立)|予約しました|予約されました|予約を受け付け/.test(bodyText)) return true;
+    if (/以下の内容で予約してもよろしいですか/.test(bodyText)) {
+      if (!bodyText.includes(vacancy.date) || !bodyText.includes(target)) {
+        throw new Error(`予約確認内容が検出した枠と一致しません（予定: ${target} ${vacancy.details}）`);
+      }
+    }
     const actions = await visibleActionControls(frame);
-    const finalAction = actions.find(({ label }) => /^(予約する|予約確定|確定する|確定|はい)$/.test(label));
+    const finalAction = actions.find(({ label }) => /^(予約|予約する|予約確定|確定する|確定|はい)$/.test(label));
     if (!finalAction) throw new Error(`予約確認ボタンを安全に特定できません（表示: ${actions.map(({ label }) => label).filter(Boolean).join(" / ") || "なし"}）`);
     if (!config.autoBook) {
       if (!dryRunSeen.has(vacancy.fingerprint)) {
@@ -277,10 +297,13 @@ function cleanApprovals() {
 async function processApproved(frame, target) {
   const approval = [...pendingApprovals.values()].find((item) => item.approved && !item.used && item.target === target && Date.now() <= item.expiresAt);
   if (!approval) return false;
-  const options = await frame.locator("#ddlWeeks option").evaluateAll((els) => els.map((el) => el.value));
-  for (const optionValue of options) {
-    await refreshWeek(frame, optionValue);
-    const vacancy = (await findVacancies(frame, target)).find((item) => item.fingerprint === approval.fingerprint);
+  const options = await frame.locator("#ddlWeeks option").evaluateAll((els) => els.map((el) => ({
+    value: el.value,
+    label: (el.textContent || "").replace(/\s+/g, " ").trim(),
+  })));
+  for (const option of options) {
+    await refreshWeek(frame, option.value);
+    const vacancy = (await findVacancies(frame, target, option.label)).find((item) => item.fingerprint === approval.fingerprint);
     if (!vacancy) continue;
     approval.used = true;
     await clickVacancy(frame, vacancy);
@@ -316,7 +339,7 @@ async function monitor(page) {
       let booked = false;
       for (const option of options) {
         await refreshWeek(frame, option.value);
-        for (const vacancy of await findVacancies(frame, target)) {
+        for (const vacancy of await findVacancies(frame, target, option.label)) {
           if (vacancy.date === tokyoDate()) {
             await requestSameDayApproval(vacancy, target);
             continue;
