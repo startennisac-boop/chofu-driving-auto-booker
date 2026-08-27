@@ -8,6 +8,7 @@ const config = {
   password: process.env.PASSWORD,
   ntfyTopic: process.env.NTFY_TOPIC?.trim(),
   autoBook: /^true$/i.test(process.env.AUTO_BOOK || "false"),
+  autoBookNotBefore: process.env.AUTO_BOOK_NOT_BEFORE ? Date.parse(process.env.AUTO_BOOK_NOT_BEFORE) : 0,
   pollMs: Math.max(60, Number(process.env.POLL_INTERVAL_SECONDS || 60)) * 1000,
   headless: !/^false$/i.test(process.env.HEADLESS || "true"),
   approvalMs: Math.max(2, Number(process.env.APPROVAL_MINUTES || 5)) * 60_000,
@@ -48,12 +49,19 @@ function tokyoDate() {
 }
 
 async function notify(title, message, priority = 3, tags = ["car"], actions = []) {
-  const response = await fetch("https://ntfy.sh/", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ topic: config.ntfyTopic, title, message, priority, tags, ...(actions.length ? { actions } : {}) }),
-  });
-  if (!response.ok) throw new Error(`通知送信に失敗しました (${response.status})`);
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const response = await fetch("https://ntfy.sh/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topic: config.ntfyTopic, title, message, priority, tags, ...(actions.length ? { actions } : {}) }),
+    });
+    if (response.ok) return;
+    if (attempt === 3 || (response.status !== 429 && response.status < 500)) {
+      throw new Error(`通知送信に失敗しました (${response.status})`);
+    }
+    const retryAfter = Math.min(15, Math.max(2, Number(response.headers.get("retry-after") || attempt * 3)));
+    await sleep(retryAfter * 1000);
+  }
 }
 
 function escapeHtml(value) {
@@ -172,7 +180,7 @@ async function announceTarget(target) {
   if (target === currentTarget) return;
   const previous = currentTarget;
   currentTarget = target;
-  await notify(previous ? "次の教習へ監視を継続します" : "教習予約の監視を開始しました", previous ? `予約対象が「${previous}」から「${target}」に変わりました。` : `予約対象：「${target}」`, 3, ["white_check_mark", "car"]);
+  await notify(previous ? "次の教習へ監視を継続します" : "教習予約の監視を開始しました", previous ? `予約対象が「${previous}」から「${target}」に変わりました。` : `予約対象：「${target}」`, 3, ["white_check_mark", "car"]).catch((error) => log(error.message));
 }
 
 async function refreshWeek(frame, optionValue) {
@@ -225,9 +233,9 @@ async function findVacancies(frame, target, weekLabel) {
 
 async function clickVacancy(frame, vacancy) {
   const item = frame.locator(`#${vacancy.containerId}`).locator(":scope > *").nth(vacancy.itemIndex);
-  const expander = frame.locator(`#lstDetail_${vacancy.dayIndex}_pbt`);
-  if (!(await item.isVisible().catch(() => false)) && await expander.count()) {
-    await expander.click({ force: true });
+  const dayHeader = frame.locator(`#lst_ih_${vacancy.dayIndex} + div .blocks`);
+  if (!(await item.isVisible().catch(() => false)) && await dayHeader.count()) {
+    await dayHeader.click({ force: true });
     await sleep(350);
   }
   const clickable = item.locator('button, input[type="submit"], a, [onclick], [role="button"]');
@@ -260,10 +268,11 @@ async function finishBooking(frame, vacancy, target) {
     const actions = await visibleActionControls(frame);
     const finalAction = actions.find(({ label }) => /^(予約|予約する|予約確定|確定する|確定|はい)$/.test(label));
     if (!finalAction) throw new Error(`予約確認ボタンを安全に特定できません（表示: ${actions.map(({ label }) => label).filter(Boolean).join(" / ") || "なし"}）`);
-    if (!config.autoBook) {
+    if (!config.autoBook || Date.now() < config.autoBookNotBefore) {
       if (!dryRunSeen.has(vacancy.fingerprint)) {
+        const reason = config.autoBook && Date.now() < config.autoBookNotBefore ? "手持ち予約の上限解除待ちのため、まだ確定していません。" : "試運転中のため、予約確定はしていません。";
+        await notify("空き枠を発見しました（待機中）", `${target}\n${vacancy.details}\n${reason}`, 4, ["eyes", "car"]);
         dryRunSeen.add(vacancy.fingerprint);
-        await notify("空き枠を発見しました（試運転）", `${target}\n${vacancy.details}\n予約確定はしていません。`, 4, ["eyes", "car"]);
       }
       return false;
     }
