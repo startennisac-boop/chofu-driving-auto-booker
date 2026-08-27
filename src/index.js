@@ -309,7 +309,10 @@ async function monitor(page) {
         frame = await loginAndOpenBooking(page);
         continue;
       }
-      const options = await frame.locator("#ddlWeeks option").evaluateAll((els) => els.map((el) => ({ value: el.value, label: normalize(el.textContent) })));
+      const options = await frame.locator("#ddlWeeks option").evaluateAll((els) => els.map((el) => ({
+        value: el.value,
+        label: (el.textContent || "").replace(/\s+/g, " ").trim(),
+      })));
       let booked = false;
       for (const option of options) {
         await refreshWeek(frame, option.value);
