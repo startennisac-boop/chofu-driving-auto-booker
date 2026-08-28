@@ -270,11 +270,16 @@ async function findVacancies(frame, target, weekLabel) {
 async function clickVacancy(frame, vacancy) {
   const item = frame.locator(`#${vacancy.containerId}`).locator(":scope > .page").nth(vacancy.itemIndex);
   const dayHeader = frame.locator(`#lst_ih_${vacancy.dayIndex} + div .blocks`);
-  if (!(await item.isVisible().catch(() => false)) && await dayHeader.count()) {
+  const dayPanel = frame.locator(`#pnlSlide_${vacancy.dayIndex}`);
+  const panelIsOpen = await dayPanel.evaluate((element) => element.getBoundingClientRect().height > 1).catch(() => false);
+  if (!panelIsOpen && await dayHeader.count()) {
     await dayHeader.click({ force: true });
     await sleep(350);
   }
-  const clickable = item.locator('button, input[type="submit"], a, [onclick], [role="button"]');
+  if (!(await item.isVisible().catch(() => false))) {
+    throw new Error(`空き枠を画面上に展開できませんでした（${vacancy.details}）`);
+  }
+  const clickable = item.locator('button, input[type="submit"], a, [onclick], [role="button"], .blocks');
   if (await clickable.count()) await clickable.first().click({ force: true });
   else await item.click({ force: true });
   await sleep(800);
